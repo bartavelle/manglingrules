@@ -59,22 +59,27 @@ data CharacterClass
     deriving (Show, Ord, Eq)
 
 charclass :: Parser CharacterClass
-charclass = anyChar >>= \c -> case c of
-    '?' -> anyChar >>= \l -> case l of
-            '?' -> return MatchQuestionMark
-            'v' -> return MatchVowel
-            'c' -> return MatchConsonant
-            'w' -> return MatchWhitespace
-            'p' -> return MatchPunctuation
-            's' -> return MatchSymbol
-            'l' -> return MatchLower
-            'u' -> return MatchUpper
-            'd' -> return MatchDigit
-            'a' -> return MatchLetter
-            'x' -> return MatchAlphaNum
-            'z' -> return MatchAny
-            _   -> unexpected $ "Unknown character class " ++ [l]
-    _   -> return $ MatchChar c
+charclass = do
+    c <- anyChar
+    hashcat <- getState
+    if hashcat
+        then return $ MatchChar c
+        else case c of
+            '?' -> anyChar >>= \l -> case l of
+                '?' -> return MatchQuestionMark
+                'v' -> return MatchVowel
+                'c' -> return MatchConsonant
+                'w' -> return MatchWhitespace
+                'p' -> return MatchPunctuation
+                's' -> return MatchSymbol
+                'l' -> return MatchLower
+                'u' -> return MatchUpper
+                'd' -> return MatchDigit
+                'a' -> return MatchLetter
+                'x' -> return MatchAlphaNum
+                'z' -> return MatchAny
+                _   -> unexpected $ "Unknown character class " ++ [l]
+            _   -> return $ MatchChar c
 
 data Rule
     = Noop
@@ -116,7 +121,7 @@ data Rule
     | ExtractInsert Numeric Numeric Numeric
     | Update Numeric Numeric Numeric
     | ReplaceAll CharacterClass Char
-    | PurgeAll CharacterClass Char
+    | PurgeAll CharacterClass
     | RejectIfContains CharacterClass
     | RejectUnlessContains CharacterClass
     | RejectUnlessCharInPos Numeric CharacterClass
@@ -156,17 +161,18 @@ escapeddelete = do
                     _   -> unexpected "Was expecting an escaped rule, such as \\[ or \\]"
 
 hashcatrules :: Char -> Parser [Rule]
-hashcatrules c = trace [c] $ case c of
-    'z' -> (return . H . DuplicateFirstN) <$> numeric
-    'Z' -> (return . H . DuplicateLastN) <$> numeric
-    '[' -> return [DeleteFirst]
-    ']' -> return [DeleteLast]
-    '+' -> (return . H . AsciiIncrement) <$> numeric
-    'k' -> return [H SwapFront]
-    'K' -> return [H SwapBack]
-    '*' -> (return . H) <$> (Swap <$> numeric <*> numeric)
-    'q' -> return [H DuplicateAll]
-    _ -> unexpected $ "Unknown rule (even hashcat) : " ++ [c]
+hashcatrules c = do
+    case c of
+        'z' -> (return . H . DuplicateFirstN) <$> numeric
+        'Z' -> (return . H . DuplicateLastN) <$> numeric
+        '[' -> return [DeleteFirst]
+        ']' -> return [DeleteLast]
+        '+' -> (return . H . AsciiIncrement) <$> numeric
+        'k' -> return [H SwapFront]
+        'K' -> return [H SwapBack]
+        '*' -> (return . H) <$> (Swap <$> numeric <*> numeric)
+        'q' -> return [H DuplicateAll]
+        _ -> unexpected $ "Unknown rule (even hashcat) : " ++ [c]
 
 rule :: Parser [Rule]
 rule = do
@@ -223,7 +229,7 @@ rule = do
         'X' -> return <$> (ExtractInsert <$> numeric <*> numeric <*> numeric)
         'v' -> return <$> (Update <$> numeric <*> numeric <*> numeric)
         's' -> return <$> (ReplaceAll <$> charclass <*> anyChar)
-        '@' -> return <$> (PurgeAll <$> charclass <*> anyChar)
+        '@' -> (return . PurgeAll) <$> charclass
         '!' -> (return . RejectIfContains) <$> charclass
         '/' -> (return . RejectUnlessContains) <$> charclass
         '=' -> return <$> (RejectUnlessCharInPos <$> numeric <*> charclass)
@@ -252,3 +258,7 @@ parseRuleFile hashcat fname = do
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
+
+hashcat2jtr :: Rule -> Maybe [Rule]
+hashcat2jtr (H _) = Nothing
+hashcat2jtr r = Just [r]
