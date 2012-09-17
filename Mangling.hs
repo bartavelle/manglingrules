@@ -147,7 +147,21 @@ data HashcatRule
     deriving (Show, Ord, Eq)
 
 singlechar :: Parser Char
-singlechar = anyChar
+singlechar = do
+    hashcat <- getState
+    if hashcat
+        then anyChar
+        else do
+            c <- anyChar
+            case c of
+                '\\' -> do
+                    c2 <- anyChar
+                    case c2 of
+                        ']'  -> return c2
+                        '['  -> return c2
+                        '\\' -> return c2
+                        _    -> unexpected $ "Invalid escape sequence " ++ [c2]
+                _ -> return c
 
 doubleQuotedString :: Parser String
 doubleQuotedString = do
