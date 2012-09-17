@@ -258,12 +258,12 @@ rule = do
         'N' -> return <$> (RejectUnlessNInstances <$> numeric <*> charclass)
         _   -> if hashcat
                     then hashcatrules c
-                    else unexpected "Unknown rule"
+                    else unexpected $ "Unknown rule '" ++ c : "'"
     spaces
     return r
 
 parserule :: Bool -> String -> Either String [Rule]
-parserule hashcat line = case runP (many1 rule) hashcat "rule" line of
+parserule hashcat line = case runP (spaces >> many1 rule) hashcat "rule" line of
                     Right x -> Right $ cleanup $ concat x
                     Left  r -> Left  $ show r
 
