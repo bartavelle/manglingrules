@@ -2,8 +2,8 @@ module Mangling where
 
 import Text.Parsec
 import Text.Parsec.Char
-import Control.Applicative hiding (many)
-import Data.Char (ord,chr,isSpace,digitToInt)
+import Control.Applicative hiding (many, (<|>))
+import Data.Char (ord,chr,isSpace,digitToInt,isDigit)
 import System.IO
 
 import Debug.Trace
@@ -98,6 +98,7 @@ data Rule
     | RotateLeft
     | RotateRight
     | Append Char
+    | AppendString Numeric String
     | Prepend Char
     | RejectLengthLess Numeric
     | RejectLengthMore Numeric
@@ -147,6 +148,25 @@ data HashcatRule
 
 singlechar :: Parser Char
 singlechar = anyChar
+
+doubleQuotedString :: Parser String
+doubleQuotedString = do
+    char '"'
+    v <- option "" doubleQuotedStringContent
+    char '"'
+    return v
+
+doubleQuotedStringContent = do
+    let stringEscape '"' = "\""
+        stringEscape x   = ['\\', x]
+    x <- many1 (do
+                   { char '\\'
+                   ; x <- anyChar
+                   ; return $ stringEscape x }
+               <|>
+                   many1 (noneOf "\"")
+               )
+    return $ concat x
 
 escapeddelete :: Parser [Rule]
 escapeddelete = do
@@ -202,7 +222,7 @@ rule = do
         '}' -> return [RotateRight]
         '$' -> (return . Append)  <$> singlechar
         '^' -> (return . Prepend) <$> singlechar
-        'A' -> unexpected "AN\"xxx\""
+        'A' -> return <$> (AppendString <$> numeric <*> doubleQuotedString)
         '<' -> (return . RejectLengthLess) <$> numeric
         '>' -> (return . RejectLengthMore) <$> numeric
         '\'' -> (return . Truncate) <$> numeric
@@ -244,15 +264,29 @@ rule = do
 
 parserule :: Bool -> String -> Either String [Rule]
 parserule hashcat line = case runP (many1 rule) hashcat "rule" line of
-                    Right x -> Right $ concat x
+                    Right x -> Right $ cleanup $ concat x
                     Left  r -> Left  $ show r
+
+removeNBPWD :: String -> String
+removeNBPWD str =
+    let rstr = dropWhile isDigit $ reverse str
+    in  case rstr of
+            ('=':'D':'W':'P':'B':'N':' ':xs) -> reverse xs
+            otherwise                        -> str
+
+cleanup :: [Rule] -> [Rule]
+cleanup = filter (not . isNoop)
+
+isNoop :: Rule -> Bool
+isNoop Noop = True
+isNoop _    = False
 
 parseRuleFile :: Bool -> String -> IO [Either String [Rule]]
 parseRuleFile hashcat fname = do
     let isCommentOrEmpty ""         = True
         isCommentOrEmpty ('#':_)    = True
         isCommentOrEmpty x          = all isSpace x
-    rawrules <- fmap (filter (not . isCommentOrEmpty) . lines) (readFile fname)
+    rawrules <- fmap (filter (not . isCommentOrEmpty) . map removeNBPWD . lines) (readFile fname)
     let parsed = map (parserule hashcat) rawrules
         paired = zip3 [1..] rawrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
