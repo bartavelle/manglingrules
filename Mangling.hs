@@ -367,23 +367,65 @@ showRule f rules = do
 fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
 
 showRule' _ [] = return ("", [])
-showRule' JTR (Append ' '    : xs)   = return ("Az\" \"", xs)
-showRule' JTR (Prepend ' '   : xs)   = return ("A0\" \"", xs)
-showRule' _   (Append c      : xs)   = return (['$',c], xs)
-showRule' _   (Prepend c     : xs)   = return (['^',c], xs)
-showRule' _   (LowerCase     : xs)   = return ("l", xs)
-showRule' _   (Capitalize    : xs)   = return ("c", xs)
-showRule' _   (ToggleAllCase : xs)   = return ("t", xs)
-showRule' JTR (Extract a b   : xs)   = do
+showRule' f   (H (AsciiDecrement (Intval a)) : H (AsciiDecrement (Intval b)) : xs) = showRule' f (H (AsciiDecrement (Intval (a+b))) : xs)
+showRule' f   (H (AsciiIncrement (Intval a)) : H (AsciiIncrement (Intval b)) : xs) = showRule' f (H (AsciiIncrement (Intval (a+b))) : xs)
+showRule' f   (H (AsciiDecrement (Intval a)) : H (AsciiIncrement (Intval b)) : xs) | a == b    = showRule' f xs
+                                                                                   | otherwise = showRule' f (H (AsciiDecrement (Intval (a-b))) : xs)
+showRule' f   (H (AsciiIncrement (Intval a)) : H (AsciiDecrement (Intval b)) : xs) | a == b    = showRule' f xs
+                                                                                   | otherwise = showRule' f (H (AsciiIncrement (Intval (a-b))) : xs)
+showRule' f   (H (AsciiIncrement (Intval a)) : xs ) | a == 0          = showRule' f xs
+                                                    | a < 0           = showRule' f (H (AsciiDecrement (Intval (negate a))) : xs)
+                                                    | f == HashCat    = fixpos f '-' (Intval a) xs
+                                                    | otherwise       = throwError "Ascii +/- operations not supported"
+showRule' f   (H (AsciiDecrement (Intval a)) : xs ) | a == 0          = showRule' f xs
+                                                    | a < 0           = showRule' f (H (AsciiIncrement (Intval (negate a))) : xs)
+                                                    | f == HashCat    = fixpos f '+' (Intval a) xs
+                                                    | otherwise       = throwError "Ascii +/- operations not supported"
+showRule' f   (H (BitwiseLeft  (Intval a)) : H (BitwiseLeft (Intval b))  : xs) = showRule' f (H (BitwiseLeft (Intval (a+b))) : xs)
+showRule' f   (H (BitwiseRight (Intval a)) : H (BitwiseRight (Intval b)) : xs) = showRule' f (H (BitwiseRight (Intval (a+b))) : xs)
+showRule' f   (H (BitwiseLeft  (Intval a)) : H (BitwiseRight (Intval b)) : xs) | a == b    = showRule' f xs
+                                                                               | otherwise = showRule' f (H (BitwiseLeft (Intval (a-b))) : xs)
+showRule' f   (H (BitwiseRight (Intval a)) : H (BitwiseLeft (Intval b))  : xs) | a == b    = showRule' f xs
+                                                                               | otherwise = showRule' f (H (BitwiseRight (Intval (a-b))) : xs)
+showRule' f   (H (BitwiseRight (Intval a)) : xs ) | a == 0          = showRule' f xs
+                                                  | a < 0           = showRule' f (H (BitwiseLeft (Intval (negate a))) : xs)
+                                                  | f == HashCat    = fixpos f 'R' (Intval a) xs
+                                                  | otherwise       = throwError "Bitwise operations not supported"
+showRule' f   (H (BitwiseLeft (Intval a)) : xs )  | a == 0          = showRule' f xs
+                                                  | a < 0           = showRule' f (H (BitwiseRight (Intval (negate a))) : xs)
+                                                  | f == HashCat    = fixpos f 'L' (Intval a) xs
+                                                  | otherwise       = throwError "Bitwise operations not supported"
+showRule' JTR (Append ' '       : xs)   = return ("Az\" \"", xs)
+showRule' JTR (Prepend ' '      : xs)   = return ("A0\" \"", xs)
+showRule' _   (Append c         : xs)   = return (['$',c], xs)
+showRule' _   (Prepend c        : xs)   = return (['^',c], xs)
+showRule' _   (LowerCase        : xs)   = return ("l", xs)
+showRule' _   (RotateLeft       : xs)   = return ("{", xs)
+showRule' _   (RotateRight      : xs)   = return ("}", xs)
+showRule' _   (DeleteFirst      : xs)   = return ("[", xs)
+showRule' _   (DeleteLast       : xs)   = return ("]", xs)
+showRule' _   (Capitalize       : xs)   = return ("c", xs)
+showRule' _   (ToggleAllCase    : xs)   = return ("t", xs)
+showRule' _   (Reverse          : xs)   = return ("r", xs)
+showRule' _   (Duplicate        : xs)   = return ("d", xs)
+showRule' _   (Reflect          : xs)   = return ("f", xs)
+showRule' _   (UpperCase        : xs)   = return ("u", xs)
+showRule' JTR (Insert     p ' ' : xs)   = showPos JTR p >>= \x -> return (['A', x] ++ "\" \"", xs)
+showRule' f   (Insert     p c   : xs)   = showPos f p >>= \x -> return (['i', x, c], xs)
+showRule' JTR (Overstrike p ' ' : xs)   = showPos JTR p >>= \x -> return (['D', x, ' ', 'A', x] ++ "\" \"", xs)
+showRule' f   (Overstrike p c   : xs)   = showPos f p >>= \x -> return (['o', x, c], xs)
+showRule' JTR (Extract a b      : xs)   = do
     pa <- showPos JTR a
     pb <- showPos JTR b
     return (['x', pa, pb], xs)
-showRule' JTR (Insert pos ' ': xs)   = do
-    ra <- showPos JTR pos
-    return (['A', ra] ++ "\" \"", xs)
-showRule' f (Truncate pos : xs) = fixpos f '\'' pos xs
-showRule' JTR (H (DuplicateLastN (Intval x)) : xs)  = return ( unwords ("val1" : replicate x "Xa1a"), xs )
-showRule' f   (H (DuplicateLastN pos) : xs)         = fixpos f 'Z' pos xs
+showRule' f   (Truncate pos     : xs)               = fixpos f '\'' pos xs
+showRule' f   (ToggleCase pos   : xs)               = fixpos f 'T' pos xs
+showRule' f   (Delete pos       : xs)               = fixpos f 'D' pos xs
+showRule' JTR (H (DuplicateLastN (Intval x))  : xs) = return ( unwords ("val1" : replicate x "Xa1a"), xs )
+showRule' f   (H (DuplicateLastN pos)         : xs) = fixpos f 'Z' pos xs
 showRule' JTR (H (DuplicateFirstN (Intval x)) : xs) = return ( unwords (replicate x "X010"), xs )
-showRule' f   (H (DuplicateFirstN pos) : xs)        = fixpos f 'z' pos xs
+showRule' f   (H (DuplicateFirstN pos)        : xs) = fixpos f 'z' pos xs
+showRule' JTR (H (DuplicateWord (Intval x))   : xs) = return ( unwords ("val0" : replicate x "X0aa"), xs )
+showRule' f   (H (DuplicateWord pos)          : xs) = fixpos f 'p' pos xs
+showRule' JTR (H (SwapFront)                  : xs) = return ( "X012 D0", xs)
 showRule' _ x = throwError $ "Can't decode: " ++ (show x)
