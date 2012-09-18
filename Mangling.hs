@@ -5,8 +5,12 @@ import Text.Parsec.Char
 import Control.Applicative hiding (many, (<|>))
 import Data.Char (ord,chr,isSpace,digitToInt,isDigit,toLower,isUpper)
 import System.IO
+import Control.Monad.Error
 
 import Debug.Trace
+
+data Flavor = JTR | HashCat
+    deriving (Show, Ord, Eq)
 
 {- PREPROCESSOR IMPLENTATION -}
 type PreParser = Parsec String ()
@@ -60,7 +64,7 @@ preprocess str =
 
 {- ACTUAL STUFF -}
 
-type Parser = Parsec String Bool
+type Parser = Parsec String Flavor
 
 data Numeric
     = Intval Int
@@ -117,10 +121,9 @@ data CharacterClass = CharacterClass CharacterClassType Bool
 charclass :: Parser CharacterClass
 charclass = do
     c <- anyChar
-    hashcat <- getState
-    if hashcat
-        then return $ CharacterClass (MatchChar c) False
-        else case c of
+    flavor <- getState
+    case flavor of
+        JTR -> case c of
             '?' -> anyChar >>= \l ->
                     let exclude = isUpper l
                     in  case (toLower l) of
@@ -138,6 +141,7 @@ charclass = do
                             'z' -> return $ CharacterClass MatchAny exclude
                             _   -> unexpected $ "Unknown character class " ++ [l]
             _   -> return $ CharacterClass (MatchChar c) False
+        _ -> return $ CharacterClass (MatchChar c) False
 
 data Rule
     = Noop
@@ -238,11 +242,11 @@ hashcatrules c = do
 rule :: Parser [Rule]
 rule = do
     c <- anyChar
-    hashcat <- getState
+    flavor <- getState
     r <- case c of
-        '-' -> if hashcat
-                then (return . H . AsciiDecrement) <$> numeric
-                else anyChar >>= \c -> case c of
+        '-' -> case flavor of
+                  HashCat -> (return . H . AsciiDecrement) <$> numeric
+                  JTR -> anyChar >>= \c -> case c of
                                     '8' -> return [RejectUnless8Bits]
                                     ':' -> return [Noop]
                                     'c' -> return [RejectUnlessCaseSensitive]
@@ -263,17 +267,17 @@ rule = do
         '}' -> return [RotateRight]
         '$' -> (return . Append)  <$> singlechar
         '^' -> (return . Prepend) <$> singlechar
-        'A' -> if hashcat
-                   then unexpected "Unknown rule A"
-                   else return <$> (AppendString <$> numeric <*> doubleQuotedString)
+        'A' -> case flavor of
+                   JTR -> return <$> (AppendString <$> numeric <*> doubleQuotedString)
+                   _   -> unexpected "Unknown rule A"
         '<' -> (return . RejectUnlessLengthLess) <$> numeric
         '>' -> (return . RejectUnlessLengthMore) <$> numeric
         '[' -> return [DeleteFirst]
         ']' -> return [DeleteLast]
         '\'' -> (return . Truncate) <$> numeric
-        'p' -> if hashcat
-                    then (return . H . DuplicateWord) <$> numeric
-                    else return [Pluralize]
+        'p' -> case flavor of
+                   HashCat  -> (return . H . DuplicateWord) <$> numeric
+                   _        -> return [Pluralize]
         'P' -> return [PastTense]
         'I' -> return [Genitive]
         'D' -> (return . Delete) <$> numeric
@@ -282,12 +286,12 @@ rule = do
         'o' -> return <$> (Overstrike <$> numeric <*> singlechar)
         'S' -> return [ShiftCase]
         'V' -> return [LowerVowels]
-        'R' -> if hashcat
-                    then (return . H . BitwiseRight) <$> numeric
-                    else return [ShiftRightKeyboard]
-        'L' -> if hashcat
-                    then (return . H . BitwiseLeft) <$> numeric
-                    else return [ShiftLeftKeyboard]
+        'R' -> case flavor of
+                    HashCat -> (return . H . BitwiseRight) <$> numeric
+                    _       -> return [ShiftRightKeyboard]
+        'L' -> case flavor of
+                    HashCat -> (return . H . BitwiseLeft) <$> numeric
+                    _       -> return [ShiftLeftKeyboard]
         'M' -> return [Memorize]
         'Q' -> return [RejectUnlessChanged]
         'X' -> return <$> (ExtractInsert <$> numeric <*> numeric <*> numeric)
@@ -300,14 +304,14 @@ rule = do
         '(' -> (return . RejectUnlessFirstChar) <$> charclass
         ')' -> (return . RejectUnlessLastChar) <$> charclass
         'N' -> return <$> (RejectUnlessNInstances <$> numeric <*> charclass)
-        _   -> if hashcat
-                    then hashcatrules c
-                    else unexpected $ "Unknown rule '" ++ c : "'"
+        _   -> case flavor of
+                   HashCat -> hashcatrules c
+                   _ -> unexpected $ "Unknown rule '" ++ c : "'"
     spaces
     return r
 
-parserule :: Bool -> String -> Either String [Rule]
-parserule hashcat line = case runP (spaces >> many1 rule) hashcat "rule" line of
+parserule :: Flavor -> String -> Either String [Rule]
+parserule flavor line = case runP (spaces >> many1 rule) flavor "rule" line of
                 Right x -> Right $ cleanup $ concat x
                 Left  r -> Left  $ show r
 
@@ -326,21 +330,42 @@ isNoop Noop = True
 isNoop _    = False
 
 
-parseRuleFile :: Bool -> String -> IO [Either String [Rule]]
-parseRuleFile hashcat fname = do
+parseRuleFile :: Flavor -> String -> IO [Either String [Rule]]
+parseRuleFile flavor fname = do
     let isCommentOrEmpty ""         = True
         isCommentOrEmpty ('#':_)    = True
         isCommentOrEmpty x          = all isSpace x
     rawrules <- fmap (filter (not . isCommentOrEmpty) . map removeNBPWD . lines) (readFile fname)
-    let processedrules = if hashcat
-                             then rawrules
-                             else concatMap preprocess rawrules
-        parsed = map (parserule hashcat) processedrules
+    let processedrules = case flavor of
+                             JTR -> concatMap preprocess rawrules
+                             _   -> rawrules
+        parsed = map (parserule flavor) processedrules
         paired = zip3 [1..] rawrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
 
-hashcat2jtr :: Rule -> Maybe [Rule]
-hashcat2jtr (H _) = Nothing
-hashcat2jtr r = Just [r]
+showPos :: Flavor -> Numeric -> Char
+showPos _ (Intval x) | (x>=0) && (x<10) = chr (x + ord '0')
+                     | (x>=10) && (x<36) = chr (x + ord 'A' - 10)
+                     | otherwise = error $ "Invalid Intval " ++ show x
+showPos _ x = error $ "Not yet implemented " ++ show x
+
+cnext :: Flavor -> [Rule] -> String -> Either String String
+cnext f n c = case (showRule f n) of
+                  Left x -> Left x
+                  Right ns -> Right $ c ++ " " ++ ns
+
+showRule :: Flavor -> [Rule] -> Either String String
+showRule _ [] = Right ""
+showRule JTR (Append ' '    : xs)   = cnext JTR xs "Az\" \""
+showRule JTR (Prepend ' '   : xs)   = cnext JTR xs "A0\" \""
+showRule f   (Append c      : xs)   = cnext f   xs ['$',c]
+showRule f   (Prepend c     : xs)   = cnext f   xs ['^',c]
+showRule f   (LowerCase     : xs)   = cnext f   xs "l"
+showRule f   (Capitalize    : xs)   = cnext f   xs "c"
+showRule f   (ToggleAllCase : xs)   = cnext f   xs "t"
+showRule f   (Extract a b   : xs)   = cnext f   xs ['x', showPos JTR a, showPos JTR b]
+showRule JTR (Insert pos ' ': xs)   = cnext JTR xs $ ['A', showPos JTR pos] ++ "\" \""
+showRule _ x = Left $ "Can't decode: " ++ (show x)
+
