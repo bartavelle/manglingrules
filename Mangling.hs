@@ -345,11 +345,11 @@ parseRuleFile flavor fname = do
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
 
-showPos :: Flavor -> Numeric -> Char
-showPos _ (Intval x) | (x>=0) && (x<10) = chr (x + ord '0')
-                     | (x>=10) && (x<36) = chr (x + ord 'A' - 10)
-                     | otherwise = error $ "Invalid Intval " ++ show x
-showPos _ x = error $ "Not yet implemented " ++ show x
+showPos :: Flavor -> Numeric -> Either String Char
+showPos _ (Intval x) | (x>=0) && (x<10) = Right $ chr (x + ord '0')
+                     | (x>=10) && (x<36) = Right $ chr (x + ord 'A' - 10)
+                     | otherwise = Left $ "Invalid Intval " ++ show x
+showPos _ x = Left $ "Not yet implemented " ++ show x
 
 cnext :: Flavor -> [Rule] -> String -> Either String String
 cnext f n c = case (showRule f n) of
@@ -358,14 +358,32 @@ cnext f n c = case (showRule f n) of
 
 showRule :: Flavor -> [Rule] -> Either String String
 showRule _ [] = Right ""
-showRule JTR (Append ' '    : xs)   = cnext JTR xs "Az\" \""
-showRule JTR (Prepend ' '   : xs)   = cnext JTR xs "A0\" \""
-showRule f   (Append c      : xs)   = cnext f   xs ['$',c]
-showRule f   (Prepend c     : xs)   = cnext f   xs ['^',c]
-showRule f   (LowerCase     : xs)   = cnext f   xs "l"
-showRule f   (Capitalize    : xs)   = cnext f   xs "c"
-showRule f   (ToggleAllCase : xs)   = cnext f   xs "t"
-showRule f   (Extract a b   : xs)   = cnext f   xs ['x', showPos JTR a, showPos JTR b]
-showRule JTR (Insert pos ' ': xs)   = cnext JTR xs $ ['A', showPos JTR pos] ++ "\" \""
-showRule _ x = Left $ "Can't decode: " ++ (show x)
+showRule f rules = do
+    (curstring, nextrules) <- showRule' f rules
+    nextstring <- showRule f nextrules
+    return $ curstring ++ nextstring
 
+
+fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
+
+showRule' _ [] = return ("", [])
+showRule' JTR (Append ' '    : xs)   = return ("Az\" \"", xs)
+showRule' JTR (Prepend ' '   : xs)   = return ("A0\" \"", xs)
+showRule' _   (Append c      : xs)   = return (['$',c], xs)
+showRule' _   (Prepend c     : xs)   = return (['^',c], xs)
+showRule' _   (LowerCase     : xs)   = return ("l", xs)
+showRule' _   (Capitalize    : xs)   = return ("c", xs)
+showRule' _   (ToggleAllCase : xs)   = return ("t", xs)
+showRule' JTR (Extract a b   : xs)   = do
+    pa <- showPos JTR a
+    pb <- showPos JTR b
+    return (['x', pa, pb], xs)
+showRule' JTR (Insert pos ' ': xs)   = do
+    ra <- showPos JTR pos
+    return (['A', ra] ++ "\" \"", xs)
+showRule' f (Truncate pos : xs) = fixpos f '\'' pos xs
+showRule' JTR (H (DuplicateLastN (Intval x)) : xs)  = return ( unwords ("val1" : replicate x "Xa1a"), xs )
+showRule' f   (H (DuplicateLastN pos) : xs)         = fixpos f 'Z' pos xs
+showRule' JTR (H (DuplicateFirstN (Intval x)) : xs) = return ( unwords (replicate x "X010"), xs )
+showRule' f   (H (DuplicateFirstN pos) : xs)        = fixpos f 'z' pos xs
+showRule' _ x = throwError $ "Can't decode: " ++ (show x)
