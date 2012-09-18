@@ -3,10 +3,62 @@ module Mangling where
 import Text.Parsec
 import Text.Parsec.Char
 import Control.Applicative hiding (many, (<|>))
-import Data.Char (ord,chr,isSpace,digitToInt,isDigit)
+import Data.Char (ord,chr,isSpace,digitToInt,isDigit,toLower,isUpper)
 import System.IO
 
 import Debug.Trace
+
+{- PREPROCESSOR IMPLENTATION -}
+type PreParser = Parsec String ()
+data PBlock = Raw String | ProcessorBlock String
+    deriving (Show, Ord, Eq)
+
+blockparser :: PreParser [PBlock]
+blockparser = do
+    s <- many (noneOf "\\[")
+    n <- optionMaybe anyChar
+    case n of
+        Nothing     -> return [Raw s]
+        Just '\\'   -> docheckEscape s
+        Just '['    -> fmap ((Raw s):) blockparser'
+
+blockparser' :: PreParser [PBlock]
+blockparser' = do
+    s <- many (noneOf "\\]")
+    n <- optionMaybe anyChar
+    case n of
+        Nothing     -> return [ProcessorBlock s]
+        Just '\\'   -> do
+            n' <- anyChar
+            fmap (concatBlocks (ProcessorBlock (s ++ [n']))) blockparser'
+        Just ']'    -> fmap ((ProcessorBlock s):) blockparser
+
+
+concatBlocks :: PBlock -> [PBlock] -> [PBlock]
+concatBlocks (Raw cur)              ((Raw nxt):xs)              = (Raw (cur ++ nxt)) : xs
+concatBlocks (ProcessorBlock cur)   ((ProcessorBlock nxt):xs)   = (ProcessorBlock (cur ++ nxt)) : xs
+concatBlocks cur                    next                        = cur : next
+
+-- do handle the escape sequence, and then return the right PBlock
+docheckEscape :: String -> PreParser [PBlock]
+docheckEscape curstring = do
+    n <- optionMaybe anyChar
+    case n of
+        Just x -> fmap (concatBlocks (Raw (curstring ++ [x]))) blockparser
+        Nothing -> return [Raw (curstring ++ ['\\'])]
+
+preprocess :: String -> [String]
+preprocess str =
+    let pstr = case runP (blockparser) () "" str of
+                   Right x -> x
+                   Left  r -> [Raw str]
+        tstr = map tok2str pstr
+        tok2str :: PBlock -> [[String]]
+        tok2str (Raw x) = [[x]]
+        tok2str (ProcessorBlock x) = foldl (\cur c -> cur ++ [[[c]]]) [] x
+    in map (concat . concat) $ sequence tstr
+
+{- ACTUAL STUFF -}
 
 type Parser = Parsec String Bool
 
@@ -42,7 +94,7 @@ numeric = do
         _       -> return output
 
 
-data CharacterClass
+data CharacterClassType
     = MatchQuestionMark
     | MatchVowel
     | MatchConsonant
@@ -58,28 +110,34 @@ data CharacterClass
     | MatchChar Char
     deriving (Show, Ord, Eq)
 
+-- true = match, false = exclude
+data CharacterClass = CharacterClass CharacterClassType Bool
+    deriving (Show, Ord, Eq)
+
 charclass :: Parser CharacterClass
 charclass = do
     c <- anyChar
     hashcat <- getState
     if hashcat
-        then return $ MatchChar c
+        then return $ CharacterClass (MatchChar c) False
         else case c of
-            '?' -> anyChar >>= \l -> case l of
-                '?' -> return MatchQuestionMark
-                'v' -> return MatchVowel
-                'c' -> return MatchConsonant
-                'w' -> return MatchWhitespace
-                'p' -> return MatchPunctuation
-                's' -> return MatchSymbol
-                'l' -> return MatchLower
-                'u' -> return MatchUpper
-                'd' -> return MatchDigit
-                'a' -> return MatchLetter
-                'x' -> return MatchAlphaNum
-                'z' -> return MatchAny
-                _   -> unexpected $ "Unknown character class " ++ [l]
-            _   -> return $ MatchChar c
+            '?' -> anyChar >>= \l ->
+                    let exclude = isUpper l
+                    in  case (toLower l) of
+                            '?' -> return $ CharacterClass MatchQuestionMark exclude
+                            'v' -> return $ CharacterClass MatchVowel exclude
+                            'c' -> return $ CharacterClass MatchConsonant exclude
+                            'w' -> return $ CharacterClass MatchWhitespace exclude
+                            'p' -> return $ CharacterClass MatchPunctuation exclude
+                            's' -> return $ CharacterClass MatchSymbol exclude
+                            'l' -> return $ CharacterClass MatchLower exclude
+                            'u' -> return $ CharacterClass MatchUpper exclude
+                            'd' -> return $ CharacterClass MatchDigit exclude
+                            'a' -> return $ CharacterClass MatchLetter exclude
+                            'x' -> return $ CharacterClass MatchAlphaNum exclude
+                            'z' -> return $ CharacterClass MatchAny exclude
+                            _   -> unexpected $ "Unknown character class " ++ [l]
+            _   -> return $ CharacterClass (MatchChar c) False
 
 data Rule
     = Noop
@@ -100,8 +158,8 @@ data Rule
     | Append Char
     | AppendString Numeric String
     | Prepend Char
-    | RejectLengthLess Numeric
-    | RejectLengthMore Numeric
+    | RejectUnlessLengthLess Numeric
+    | RejectUnlessLengthMore Numeric
     | Truncate Numeric
     | Pluralize
     | PastTense
@@ -147,60 +205,29 @@ data HashcatRule
     deriving (Show, Ord, Eq)
 
 singlechar :: Parser Char
-singlechar = do
-    hashcat <- getState
-    if hashcat
-        then anyChar
-        else do
-            c <- anyChar
-            case c of
-                '\\' -> do
-                    c2 <- anyChar
-                    case c2 of
-                        ']'  -> return c2
-                        '['  -> return c2
-                        '\\' -> return c2
-                        _    -> unexpected $ "Invalid escape sequence " ++ [c2]
-                _ -> return c
+singlechar = anyChar
 
 doubleQuotedString :: Parser String
-doubleQuotedString = do
-    char '"'
-    v <- option "" doubleQuotedStringContent
-    char '"'
-    return v
+doubleQuotedString = char '"' >> doubleQuotedStringContent
 
 doubleQuotedStringContent = do
-    let stringEscape '"' = "\""
-        stringEscape x   = ['\\', x]
-    x <- many1 (do
-                   { char '\\'
-                   ; x <- anyChar
-                   ; return $ stringEscape x }
-               <|>
-                   many1 (noneOf "\"")
-               )
-    return $ concat x
-
-escapeddelete :: Parser [Rule]
-escapeddelete = do
-    hashcat <- getState
-    if hashcat
-        then unexpected "Unknown rule"
-        else do
-                n <- anyChar
-                case n of
-                    '[' -> return [DeleteFirst]
-                    ']' -> return [DeleteLast]
-                    _   -> unexpected "Was expecting an escaped rule, such as \\[ or \\]"
+    c1 <- optionMaybe anyChar
+    case c1 of
+        Just '\\' -> do
+            c2 <- anyChar
+            n <- doubleQuotedStringContent
+            return (c2:n)
+        Just '"' -> return ""
+        Just x -> do
+            n <- doubleQuotedStringContent
+            return (x:n)
+        Nothing -> return ""
 
 hashcatrules :: Char -> Parser [Rule]
 hashcatrules c = do
     case c of
         'z' -> (return . H . DuplicateFirstN) <$> numeric
         'Z' -> (return . H . DuplicateLastN) <$> numeric
-        '[' -> return [DeleteFirst]
-        ']' -> return [DeleteLast]
         '+' -> (return . H . AsciiIncrement) <$> numeric
         'k' -> return [H SwapFront]
         'K' -> return [H SwapBack]
@@ -236,16 +263,19 @@ rule = do
         '}' -> return [RotateRight]
         '$' -> (return . Append)  <$> singlechar
         '^' -> (return . Prepend) <$> singlechar
-        'A' -> return <$> (AppendString <$> numeric <*> doubleQuotedString)
-        '<' -> (return . RejectLengthLess) <$> numeric
-        '>' -> (return . RejectLengthMore) <$> numeric
+        'A' -> if hashcat
+                   then unexpected "Unknown rule A"
+                   else return <$> (AppendString <$> numeric <*> doubleQuotedString)
+        '<' -> (return . RejectUnlessLengthLess) <$> numeric
+        '>' -> (return . RejectUnlessLengthMore) <$> numeric
+        '[' -> return [DeleteFirst]
+        ']' -> return [DeleteLast]
         '\'' -> (return . Truncate) <$> numeric
         'p' -> if hashcat
                     then (return . H . DuplicateWord) <$> numeric
                     else return [Pluralize]
         'P' -> return [PastTense]
         'I' -> return [Genitive]
-        '\\' -> escapeddelete
         'D' -> (return . Delete) <$> numeric
         'x' -> return <$> (Extract <$> numeric <*> numeric)
         'i' -> return <$> (Insert <$> numeric <*> singlechar)
@@ -278,8 +308,8 @@ rule = do
 
 parserule :: Bool -> String -> Either String [Rule]
 parserule hashcat line = case runP (spaces >> many1 rule) hashcat "rule" line of
-                    Right x -> Right $ cleanup $ concat x
-                    Left  r -> Left  $ show r
+                Right x -> Right $ cleanup $ concat x
+                Left  r -> Left  $ show r
 
 removeNBPWD :: String -> String
 removeNBPWD str =
@@ -295,13 +325,17 @@ isNoop :: Rule -> Bool
 isNoop Noop = True
 isNoop _    = False
 
+
 parseRuleFile :: Bool -> String -> IO [Either String [Rule]]
 parseRuleFile hashcat fname = do
     let isCommentOrEmpty ""         = True
         isCommentOrEmpty ('#':_)    = True
         isCommentOrEmpty x          = all isSpace x
     rawrules <- fmap (filter (not . isCommentOrEmpty) . map removeNBPWD . lines) (readFile fname)
-    let parsed = map (parserule hashcat) rawrules
+    let processedrules = if hashcat
+                             then rawrules
+                             else concatMap preprocess rawrules
+        parsed = map (parserule hashcat) processedrules
         paired = zip3 [1..] rawrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
         niceError (_, _  , Right x ) = Right x
