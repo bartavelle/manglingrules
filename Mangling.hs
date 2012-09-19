@@ -1,9 +1,14 @@
 module Mangling (
-    preprocess,
-    parseRuleFile,
-    parseSingleRule,
-    showRule
-) where
+        preprocess,
+        parseRuleFile,
+        parseSingleRule,
+        showRule,
+        Flavor (..),
+        Rule (..),
+        Numeric (..),
+        CharacterClassType (..),
+        CharacterClass (..)
+    ) where
 
 import Text.Parsec
 import Control.Applicative hiding (many, (<|>))
@@ -104,6 +109,8 @@ showPos :: Flavor -> Numeric -> Either String Char
 showPos _ (Intval x) | (x>=0) && (x<10) = Right $ chr (x + ord '0')
                      | (x>=10) && (x<36) = Right $ chr (x + ord 'A' - 10)
                      | otherwise = Left $ "Invalid Intval " ++ show x
+showPos JTR (Variable x) | x <= 10  = Right $ chr (x + ord 'a')
+                         | otherwise = Left $ "Bad value for variable " ++ show x
 showPos JTR MaxLength           = Right '*'
 showPos JTR MaxLengthMinus1     = Right '-'
 showPos JTR MaxLengthPlus1      = Right '+'
@@ -360,11 +367,13 @@ removeNBPWD str =
             _                                -> str
 
 cleanup :: [Rule] -> [Rule]
-cleanup = filter (not . isNoop)
+cleanup = concatMap cleanup'
 
-isNoop :: Rule -> Bool
-isNoop Noop = True
-isNoop _    = False
+cleanup' :: Rule -> [Rule]
+cleanup' Noop = []
+cleanup' (AppendString Infinite   [c]) = [Append c]
+cleanup' (AppendString (Intval 0) [c]) = [Prepend c]
+cleanup' x    = [x]
 
 parseSingleRule :: Flavor -> String -> [Either String [Rule]]
 parseSingleRule flavor crule = case flavor of
@@ -386,14 +395,26 @@ parseRuleFile flavor fname = do
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
 
+escapeJTR :: String -> String
+escapeJTR = concatMap escapeJTR'
+
+escapeJTR' :: Char -> String
+escapeJTR' '['  = "\\["
+escapeJTR' ']'  = "\\]"
+escapeJTR' '\\' = "\\\\"
+escapeJTR' x    = [x]
+
 showRule :: Flavor -> [Rule] -> Either String String
 showRule _ [] = Right ""
 showRule f rules = do
     (curstring, nextrules) <- showRule' f rules
+    let pstring = case f of
+                        JTR -> escapeJTR curstring
+                        _   -> curstring
     nextstring <- showRule f nextrules
     if null nextstring
-        then return curstring
-        else return $ curstring ++ " " ++ nextstring
+        then return pstring
+        else return $ pstring ++ " " ++ nextstring
 
 fixpos :: Flavor -> Char -> Numeric -> [Rule] -> Either String (String, [Rule])
 fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
@@ -445,6 +466,12 @@ showRule' _   (Reverse          : xs)   = return ("r", xs)
 showRule' _   (Duplicate        : xs)   = return ("d", xs)
 showRule' _   (Reflect          : xs)   = return ("f", xs)
 showRule' _   (UpperCase        : xs)   = return ("u", xs)
+showRule' _   (LowerVowels      : xs)   = return ("V", xs)
+showRule' _   (ShiftCase        : xs)   = return ("S", xs)
+showRule' JTR (ShiftRightKeyboard:xs)   = return ("R", xs)
+showRule' JTR (ShiftLeftKeyboard: xs)   = return ("L", xs)
+showRule' JTR (PastTense        : xs)   = return ("P", xs)
+showRule' JTR (Genitive         : xs)   = return ("I", xs)
 showRule' JTR (Insert     p ' ' : xs)   = showPos JTR p >>= \x -> return (['A', x] ++ "\" \"", xs)
 showRule' f   (Insert     p c   : xs)   = showPos f p >>= \x -> return (['i', x, c], xs)
 showRule' JTR (Overstrike p ' ' : xs)   = showPos JTR p >>= \x -> return (['D', x, ' ', 'A', x] ++ "\" \"", xs)
