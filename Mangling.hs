@@ -1,17 +1,14 @@
 module Mangling (
     preprocess,
     parseRuleFile,
+    parseSingleRule,
     showRule
 ) where
 
 import Text.Parsec
-import Text.Parsec.Char
 import Control.Applicative hiding (many, (<|>))
-import Data.Char (ord,chr,isSpace,digitToInt,isDigit,toLower,isUpper,toUpper)
-import System.IO
+import Data.Char (ord,chr,isSpace,isDigit,toLower,isUpper,toUpper)
 import Control.Monad.Error
-
-import Debug.Trace
 
 data Flavor = JTR | HashCat
     deriving (Show, Ord, Eq)
@@ -28,7 +25,8 @@ blockparser = do
     case n of
         Nothing     -> return [Raw s]
         Just '\\'   -> docheckEscape s
-        Just '['    -> fmap ((Raw s):) blockparser'
+        Just '['    -> fmap ( Raw s :) blockparser'
+        Just x      -> error $ "Can't happen at blockparser : " ++ [x]
 
 blockparser' :: PreParser [PBlock]
 blockparser' = do
@@ -39,12 +37,13 @@ blockparser' = do
         Just '\\'   -> do
             n' <- anyChar
             fmap (concatBlocks (ProcessorBlock (s ++ [n']))) blockparser'
-        Just ']'    -> fmap ((ProcessorBlock s):) blockparser
+        Just ']'    -> fmap ( ProcessorBlock s :) blockparser
+        Just x      -> error $ "Can't happen at blockparser' : " ++ [x]
 
 
 concatBlocks :: PBlock -> [PBlock] -> [PBlock]
-concatBlocks (Raw cur)              ((Raw nxt):xs)              = (Raw (cur ++ nxt)) : xs
-concatBlocks (ProcessorBlock cur)   ((ProcessorBlock nxt):xs)   = (ProcessorBlock (cur ++ nxt)) : xs
+concatBlocks (Raw cur)              (Raw nxt : xs)              = Raw (cur ++ nxt) : xs
+concatBlocks (ProcessorBlock cur)   (ProcessorBlock nxt : xs)   = ProcessorBlock (cur ++ nxt) : xs
 concatBlocks cur                    next                        = cur : next
 
 -- do handle the escape sequence, and then return the right PBlock
@@ -53,13 +52,13 @@ docheckEscape curstring = do
     n <- optionMaybe anyChar
     case n of
         Just x -> fmap (concatBlocks (Raw (curstring ++ [x]))) blockparser
-        Nothing -> return [Raw (curstring ++ ['\\'])]
+        Nothing -> return [Raw (curstring ++ "\\")]
 
 preprocess :: String -> [String]
 preprocess str =
-    let pstr = case runP (blockparser) () "" str of
+    let pstr = case runP blockparser () "" str of
                    Right x -> x
-                   Left  r -> [Raw str]
+                   Left  _ -> [Raw str]
         tstr = map tok2str pstr
         tok2str :: PBlock -> [[String]]
         tok2str (Raw x) = [[x]]
@@ -144,7 +143,7 @@ charclass = do
         JTR -> case c of
             '?' -> anyChar >>= \l ->
                     let exclude = isUpper l
-                    in  case (toLower l) of
+                    in  case toLower l of
                             '?' -> return $ CharacterClass MatchQuestionMark exclude
                             'v' -> return $ CharacterClass MatchVowel exclude
                             'c' -> return $ CharacterClass MatchConsonant exclude
@@ -252,6 +251,7 @@ singlechar = anyChar
 doubleQuotedString :: Parser String
 doubleQuotedString = char '"' >> doubleQuotedStringContent
 
+doubleQuotedStringContent :: Parser String
 doubleQuotedStringContent = do
     c1 <- optionMaybe anyChar
     case c1 of
@@ -266,8 +266,7 @@ doubleQuotedStringContent = do
         Nothing -> return ""
 
 hashcatrules :: Char -> Parser [Rule]
-hashcatrules c = do
-    case c of
+hashcatrules c = case c of
         'z' -> (return . H . DuplicateFirstN) <$> numeric
         'Z' -> (return . H . DuplicateLastN) <$> numeric
         '+' -> (return . H . AsciiIncrement) <$> numeric
@@ -284,7 +283,7 @@ rule = do
     r <- case c of
         '-' -> case flavor of
                   HashCat -> (return . H . AsciiDecrement) <$> numeric
-                  JTR -> anyChar >>= \c -> case c of
+                  JTR -> anyChar >>= \c' -> case c' of
                                     '8' -> return [RejectUnless8Bits]
                                     ':' -> return [Noop]
                                     'c' -> return [RejectUnlessCaseSensitive]
@@ -358,7 +357,7 @@ removeNBPWD str =
     let rstr = dropWhile isDigit $ reverse str
     in  case rstr of
             ('=':'D':'W':'P':'B':'N':' ':xs) -> reverse xs
-            otherwise                        -> str
+            _                                -> str
 
 cleanup :: [Rule] -> [Rule]
 cleanup = filter (not . isNoop)
@@ -367,6 +366,10 @@ isNoop :: Rule -> Bool
 isNoop Noop = True
 isNoop _    = False
 
+parseSingleRule :: Flavor -> String -> [Either String [Rule]]
+parseSingleRule flavor crule = case flavor of
+                                JTR -> map (parserule flavor) $ preprocess crule
+                                _   -> [parserule flavor crule]
 
 parseRuleFile :: Flavor -> String -> IO [Either String [Rule]]
 parseRuleFile flavor fname = do
@@ -378,15 +381,10 @@ parseRuleFile flavor fname = do
                              JTR -> concatMap preprocess rawrules
                              _   -> rawrules
         parsed = map (parserule flavor) processedrules
-        paired = zip3 [1..] processedrules parsed
+        paired = zip3 ([1..] :: [Int]) processedrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
-
-cnext :: Flavor -> [Rule] -> String -> Either String String
-cnext f n c = case (showRule f n) of
-                  Left x -> Left x
-                  Right ns -> Right $ c ++ " " ++ ns
 
 showRule :: Flavor -> [Rule] -> Either String String
 showRule _ [] = Right ""
@@ -464,7 +462,7 @@ showRule' JTR (H (DuplicateFirstN (Intval x)) : xs) = return ( unwords (replicat
 showRule' f   (H (DuplicateFirstN pos)        : xs) = fixpos f 'z' pos xs
 showRule' JTR (H (DuplicateWord (Intval x))   : xs) = return ( unwords ("val0" : replicate x "X0aa"), xs )
 showRule' f   (H (DuplicateWord pos)          : xs) = fixpos f 'p' pos xs
-showRule' JTR (H (SwapFront)                  : xs) = return ( "X012 D0", xs)
+showRule' JTR (H SwapFront                    : xs) = return ( "X012 D0", xs)
 showRule' JTR (H (Swap p1 (Intval p2))        : xs) = do
     r1  <- showPos JTR p1
     r2  <- showPos JTR (Intval p2)
@@ -492,5 +490,5 @@ showRule' JTR (RejectUnlessCharInPos p cc : xs)     = fmap (\x -> ('=' : x : sho
 showRule' JTR (RejectUnlessNInstances p cc : xs)    = fmap (\x -> ('N' : x : showCC cc, xs)) (showPos JTR p)
 showRule' JTR (RejectUnlessLengthMore pos : xs)     = fixpos JTR '>' pos xs
 showRule' JTR (RejectUnlessLengthLess pos : xs)     = fixpos JTR '<' pos xs
-showRule' _ x = throwError $ "Can't decode: " ++ (show x)
+showRule' _ x = throwError $ "Can't decode: " ++ show x
 
