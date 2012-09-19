@@ -1,9 +1,13 @@
-module Mangling where
+module Mangling (
+    preprocess,
+    parseRuleFile,
+    showRule
+) where
 
 import Text.Parsec
 import Text.Parsec.Char
 import Control.Applicative hiding (many, (<|>))
-import Data.Char (ord,chr,isSpace,digitToInt,isDigit,toLower,isUpper)
+import Data.Char (ord,chr,isSpace,digitToInt,isDigit,toLower,isUpper,toUpper)
 import System.IO
 import Control.Monad.Error
 
@@ -97,6 +101,20 @@ numeric = do
         Unknown -> unexpected "Can't decode position"
         _       -> return output
 
+showPos :: Flavor -> Numeric -> Either String Char
+showPos _ (Intval x) | (x>=0) && (x<10) = Right $ chr (x + ord '0')
+                     | (x>=10) && (x<36) = Right $ chr (x + ord 'A' - 10)
+                     | otherwise = Left $ "Invalid Intval " ++ show x
+showPos JTR MaxLength           = Right '*'
+showPos JTR MaxLengthMinus1     = Right '-'
+showPos JTR MaxLengthPlus1      = Right '+'
+showPos JTR CurrentWordLength   = Right 'l'
+showPos JTR InitialLastCharPos  = Right 'm'
+showPos JTR PosFoundChar        = Right 'p'
+showPos JTR Infinite            = Right 'z'
+showPos _ x = Left $ "Not yet implemented " ++ show x
+
+
 
 data CharacterClassType
     = MatchQuestionMark
@@ -142,6 +160,26 @@ charclass = do
                             _   -> unexpected $ "Unknown character class " ++ [l]
             _   -> return $ CharacterClass (MatchChar c) False
         _ -> return $ CharacterClass (MatchChar c) False
+
+
+mu :: Char -> Bool -> String
+mu c False = ['?', c]
+mu c True  = ['?', toUpper c]
+
+showCC :: CharacterClass -> String
+showCC (CharacterClass (MatchChar c) _) = [c]
+showCC (CharacterClass MatchQuestionMark _) = "?"
+showCC (CharacterClass MatchVowel x)        = mu 'v' x
+showCC (CharacterClass MatchConsonant x)    = mu 'c' x
+showCC (CharacterClass MatchWhitespace x)   = mu 'w' x
+showCC (CharacterClass MatchPunctuation x)  = mu 'p' x
+showCC (CharacterClass MatchSymbol x)       = mu 's' x
+showCC (CharacterClass MatchLower x)        = mu 'l' x
+showCC (CharacterClass MatchUpper x)        = mu 'u' x
+showCC (CharacterClass MatchDigit x)        = mu 'd' x
+showCC (CharacterClass MatchLetter x)       = mu 'a' x
+showCC (CharacterClass MatchAlphaNum x)     = mu 'x' x
+showCC (CharacterClass MatchAny x)          = mu 'z' x
 
 data Rule
     = Noop
@@ -340,16 +378,10 @@ parseRuleFile flavor fname = do
                              JTR -> concatMap preprocess rawrules
                              _   -> rawrules
         parsed = map (parserule flavor) processedrules
-        paired = zip3 [1..] rawrules parsed
+        paired = zip3 [1..] processedrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
         niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
-
-showPos :: Flavor -> Numeric -> Either String Char
-showPos _ (Intval x) | (x>=0) && (x<10) = Right $ chr (x + ord '0')
-                     | (x>=10) && (x<36) = Right $ chr (x + ord 'A' - 10)
-                     | otherwise = Left $ "Invalid Intval " ++ show x
-showPos _ x = Left $ "Not yet implemented " ++ show x
 
 cnext :: Flavor -> [Rule] -> String -> Either String String
 cnext f n c = case (showRule f n) of
@@ -361,11 +393,14 @@ showRule _ [] = Right ""
 showRule f rules = do
     (curstring, nextrules) <- showRule' f rules
     nextstring <- showRule f nextrules
-    return $ curstring ++ nextstring
+    if null nextstring
+        then return curstring
+        else return $ curstring ++ " " ++ nextstring
 
-
+fixpos :: Flavor -> Char -> Numeric -> [Rule] -> Either String (String, [Rule])
 fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
 
+showRule' :: Flavor -> [Rule] -> Either String (String, [Rule])
 showRule' _ [] = return ("", [])
 showRule' f   (H (AsciiDecrement (Intval a)) : H (AsciiDecrement (Intval b)) : xs) = showRule' f (H (AsciiDecrement (Intval (a+b))) : xs)
 showRule' f   (H (AsciiIncrement (Intval a)) : H (AsciiIncrement (Intval b)) : xs) = showRule' f (H (AsciiIncrement (Intval (a+b))) : xs)
@@ -395,6 +430,8 @@ showRule' f   (H (BitwiseLeft (Intval a)) : xs )  | a == 0          = showRule' 
                                                   | a < 0           = showRule' f (H (BitwiseRight (Intval (negate a))) : xs)
                                                   | f == HashCat    = fixpos f 'L' (Intval a) xs
                                                   | otherwise       = throwError "Bitwise operations not supported"
+showRule' _   (ReplaceAll cc c  : xs)   = return ('s' : showCC cc ++ [c], xs)
+showRule' _   (PurgeAll cc      : xs)   = return ('@' : showCC cc, xs)
 showRule' JTR (Append ' '       : xs)   = return ("Az\" \"", xs)
 showRule' JTR (Prepend ' '      : xs)   = return ("A0\" \"", xs)
 showRule' _   (Append c         : xs)   = return (['$',c], xs)
@@ -428,4 +465,32 @@ showRule' f   (H (DuplicateFirstN pos)        : xs) = fixpos f 'z' pos xs
 showRule' JTR (H (DuplicateWord (Intval x))   : xs) = return ( unwords ("val0" : replicate x "X0aa"), xs )
 showRule' f   (H (DuplicateWord pos)          : xs) = fixpos f 'p' pos xs
 showRule' JTR (H (SwapFront)                  : xs) = return ( "X012 D0", xs)
+showRule' JTR (H (Swap p1 (Intval p2))        : xs) = do
+    r1  <- showPos JTR p1
+    r2  <- showPos JTR (Intval p2)
+    r2' <- showPos JTR (Intval (p2+1))
+    return ( ['X', r1, '1', r2, ' ', 'D', r1, ' ', 'X', r2, '1', r1, ' ', 'D', r2'], xs)
+showRule' f   (H (Swap p1 p2)                 : xs) = do
+    r1 <- showPos f p1
+    r2 <- showPos f p2
+    return ( ['*', r1, r2], xs )
+showRule' JTR (H DuplicateAll : _)                  = throwError "DuplicateAll (q in HashCat) is not supported for JTR yet."
+showRule' _   (H DuplicateAll : xs)                 = return ("q", xs)
+showRule' JTR (RejectUnless8Bits : xs)              = return ("-8", xs)
+showRule' JTR (Noop : xs)                           = return (":", xs)
+showRule' JTR (Memorize : xs)                       = return ("M", xs)
+showRule' JTR (Pluralize : xs)                      = return ("p", xs)
+showRule' JTR (RejectUnlessChanged : xs)            = return ("Q", xs)
+showRule' JTR (RejectUnlessCaseSensitive : xs)      = return ("-c", xs)
+showRule' JTR (RejectUnlessSplit : xs)              = return ("-s", xs)
+showRule' JTR (RejectUnlessWordPairs : xs)          = return ("-p", xs)
+showRule' JTR (RejectIfContains cc : xs)            = return ('!' : showCC cc, xs)
+showRule' JTR (RejectUnlessContains cc : xs)        = return ('/' : showCC cc, xs)
+showRule' JTR (RejectUnlessFirstChar cc : xs)       = return ('(' : showCC cc, xs)
+showRule' JTR (RejectUnlessLastChar cc : xs)        = return (')' : showCC cc, xs)
+showRule' JTR (RejectUnlessCharInPos p cc : xs)     = fmap (\x -> ('=' : x : showCC cc, xs)) (showPos JTR p)
+showRule' JTR (RejectUnlessNInstances p cc : xs)    = fmap (\x -> ('N' : x : showCC cc, xs)) (showPos JTR p)
+showRule' JTR (RejectUnlessLengthMore pos : xs)     = fixpos JTR '>' pos xs
+showRule' JTR (RejectUnlessLengthLess pos : xs)     = fixpos JTR '<' pos xs
 showRule' _ x = throwError $ "Can't decode: " ++ (show x)
+
