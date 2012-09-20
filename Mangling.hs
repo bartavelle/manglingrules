@@ -517,5 +517,6 @@ showRule' JTR (RejectUnlessCharInPos p cc : xs)     = fmap (\x -> ('=' : x : sho
 showRule' JTR (RejectUnlessNInstances p cc : xs)    = fmap (\x -> ('N' : x : showCC cc, xs)) (showPos JTR p)
 showRule' JTR (RejectUnlessLengthMore pos : xs)     = fixpos JTR '>' pos xs
 showRule' JTR (RejectUnlessLengthLess pos : xs)     = fixpos JTR '<' pos xs
+showRule' JTR (AppendString pos tr : xs)            = showPos JTR pos >>= \x -> return ('A' : x : show tr, xs)
 showRule' _ x = throwError $ "Can't decode: " ++ show x
 
