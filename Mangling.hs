@@ -1,5 +1,6 @@
 module Mangling (
         preprocess,
+        cleanup,
         parseRuleFile,
         parseSingleRule,
         showRule,
@@ -173,8 +174,9 @@ mu c False = ['?', c]
 mu c True  = ['?', toUpper c]
 
 showCC :: CharacterClass -> String
+showCC (CharacterClass (MatchChar '?') _) = "??"
 showCC (CharacterClass (MatchChar c) _) = [c]
-showCC (CharacterClass MatchQuestionMark _) = "?"
+showCC (CharacterClass MatchQuestionMark _) = "??"
 showCC (CharacterClass MatchVowel x)        = mu 'v' x
 showCC (CharacterClass MatchConsonant x)    = mu 'c' x
 showCC (CharacterClass MatchWhitespace x)   = mu 'w' x
@@ -189,52 +191,51 @@ showCC (CharacterClass MatchAny x)          = mu 'z' x
 
 data Rule
     = Noop
-    | RejectUnlessCaseSensitive -- -c
-    | RejectUnless8Bits         -- -8
-    | RejectUnlessSplit         -- -s
-    | RejectUnlessWordPairs     -- -p
+    | RejectUnlessCaseSensitive
+    | RejectUnless8Bits
+    | RejectUnlessSplit
+    | RejectUnlessWordPairs
     | LowerCase
     | UpperCase
     | Capitalize
     | ToggleAllCase
-    | ToggleCase Numeric
     | Reverse
     | Duplicate
     | Reflect
     | RotateLeft
     | RotateRight
-    | Append Char
-    | AppendString Numeric String
-    | Prepend Char
-    | RejectUnlessLengthLess Numeric
-    | RejectUnlessLengthMore Numeric
-    | Truncate Numeric
     | Pluralize
     | PastTense
     | Genitive
     | DeleteFirst
     | DeleteLast
-    | Delete Numeric
-    | Extract Numeric Numeric
-    | Insert Numeric Char
-    | InsertString Numeric String
-    | Overstrike Numeric Char
     | ShiftCase
     | LowerVowels
     | ShiftRightKeyboard
     | ShiftLeftKeyboard
     | Memorize
     | RejectUnlessChanged
-    | ExtractInsert Numeric Numeric Numeric
+    | Append Char
+    | Prepend Char
+    | RejectUnlessLengthLess Numeric
+    | RejectUnlessLengthMore Numeric
+    | ToggleCase Numeric
+    | Truncate Numeric
+    | Delete Numeric
+    | Extract Numeric Numeric
+    | Insert Numeric Char
+    | Overstrike Numeric Char
+    | InsertString Numeric String
     | Update Numeric Numeric Numeric
-    | ReplaceAll CharacterClass Char
+    | ExtractInsert Numeric Numeric Numeric
     | PurgeAll CharacterClass
     | RejectIfContains CharacterClass
     | RejectUnlessContains CharacterClass
-    | RejectUnlessCharInPos Numeric CharacterClass
     | RejectUnlessFirstChar CharacterClass
     | RejectUnlessLastChar CharacterClass
     | RejectUnlessNInstances Numeric CharacterClass
+    | RejectUnlessCharInPos Numeric CharacterClass
+    | ReplaceAll CharacterClass Char
     | H HashcatRule
     deriving (Show, Ord, Eq)
 
@@ -255,22 +256,12 @@ data HashcatRule
 singlechar :: Parser Char
 singlechar = anyChar
 
-doubleQuotedString :: Parser String
-doubleQuotedString = char '"' >> doubleQuotedStringContent
-
-doubleQuotedStringContent :: Parser String
-doubleQuotedStringContent = do
-    c1 <- optionMaybe anyChar
-    case c1 of
-        Just '\\' -> do
-            c2 <- anyChar
-            n <- doubleQuotedStringContent
-            return (c2:n)
-        Just '"' -> return ""
-        Just x -> do
-            n <- doubleQuotedStringContent
-            return (x:n)
-        Nothing -> return ""
+quotedString :: Parser String
+quotedString = do
+    separator <- anyChar
+    content   <- many1 $ satisfy (/= separator)
+    _ <- char separator
+    return content
 
 hashcatrules :: Char -> Parser [Rule]
 hashcatrules c = case c of
@@ -312,7 +303,7 @@ rule = do
         '$' -> (return . Append)  <$> singlechar
         '^' -> (return . Prepend) <$> singlechar
         'A' -> case flavor of
-                   JTR -> return <$> (AppendString <$> numeric <*> doubleQuotedString)
+                   JTR -> return <$> (InsertString <$> numeric <*> quotedString)
                    _   -> unexpected "Unknown rule A"
         '<' -> (return . RejectUnlessLengthLess) <$> numeric
         '>' -> (return . RejectUnlessLengthMore) <$> numeric
@@ -367,12 +358,21 @@ removeNBPWD str =
             _                                -> str
 
 cleanup :: [Rule] -> [Rule]
-cleanup = concatMap cleanup'
+cleanup rules =
+    let cleans = concatMap cleanup' rules
+        l = last cleans
+    in case (cleans, l) of
+           ([], _)               -> []
+           (_, Append ' ')       -> cleans ++ [Noop]
+           (_, Prepend ' ')      -> cleans ++ [Noop]
+           (_, Insert _ ' ')     -> cleans ++ [Noop]
+           (_, Overstrike _ ' ') -> cleans ++ [Noop]
+           _                     -> cleans
 
 cleanup' :: Rule -> [Rule]
 cleanup' Noop = []
-cleanup' (AppendString Infinite   [c]) = [Append c]
-cleanup' (AppendString (Intval 0) [c]) = [Prepend c]
+cleanup' (InsertString Infinite   [c]) = [Append c]
+cleanup' (InsertString (Intval 0) [c]) = [Prepend c]
 cleanup' x    = [x]
 
 parseSingleRule :: Flavor -> String -> [Either String [Rule]]
@@ -404,8 +404,16 @@ escapeJTR' ']'  = "\\]"
 escapeJTR' '\\' = "\\\\"
 escapeJTR' x    = [x]
 
+showDelimitedString :: String -> Either String String
+showDelimitedString s =
+    let acceptable = '"' : ['a'..'z'] ++ ['A'..'Z']
+        valids = filter (\x -> not (x `elem` s)) acceptable
+    in case valids of
+           []    -> Left "Impossible to select a valid character for a delimited string"
+           (x:_) -> Right (x : s ++ [x])
+
 showRule :: Flavor -> [Rule] -> Either String String
-showRule _ [] = Right ""
+showRule _ []    = Right ""
 showRule f rules = do
     (curstring, nextrules) <- showRule' f rules
     let pstring = case f of
@@ -451,8 +459,6 @@ showRule' f   (H (BitwiseLeft (Intval a)) : xs )  | a == 0          = showRule' 
                                                   | otherwise       = throwError "Bitwise operations not supported"
 showRule' _   (ReplaceAll cc c  : xs)   = return ('s' : showCC cc ++ [c], xs)
 showRule' _   (PurgeAll cc      : xs)   = return ('@' : showCC cc, xs)
-showRule' JTR (Append ' '       : xs)   = return ("Az\" \"", xs)
-showRule' JTR (Prepend ' '      : xs)   = return ("A0\" \"", xs)
 showRule' _   (Append c         : xs)   = return (['$',c], xs)
 showRule' _   (Prepend c        : xs)   = return (['^',c], xs)
 showRule' _   (LowerCase        : xs)   = return ("l", xs)
@@ -472,9 +478,7 @@ showRule' JTR (ShiftRightKeyboard:xs)   = return ("R", xs)
 showRule' JTR (ShiftLeftKeyboard: xs)   = return ("L", xs)
 showRule' JTR (PastTense        : xs)   = return ("P", xs)
 showRule' JTR (Genitive         : xs)   = return ("I", xs)
-showRule' JTR (Insert     p ' ' : xs)   = showPos JTR p >>= \x -> return (['A', x] ++ "\" \"", xs)
 showRule' f   (Insert     p c   : xs)   = showPos f p >>= \x -> return (['i', x, c], xs)
-showRule' JTR (Overstrike p ' ' : xs)   = showPos JTR p >>= \x -> return (['D', x, ' ', 'A', x] ++ "\" \"", xs)
 showRule' f   (Overstrike p c   : xs)   = showPos f p >>= \x -> return (['o', x, c], xs)
 showRule' JTR (Extract a b      : xs)   = do
     pa <- showPos JTR a
@@ -517,6 +521,19 @@ showRule' JTR (RejectUnlessCharInPos p cc : xs)     = fmap (\x -> ('=' : x : sho
 showRule' JTR (RejectUnlessNInstances p cc : xs)    = fmap (\x -> ('N' : x : showCC cc, xs)) (showPos JTR p)
 showRule' JTR (RejectUnlessLengthMore pos : xs)     = fixpos JTR '>' pos xs
 showRule' JTR (RejectUnlessLengthLess pos : xs)     = fixpos JTR '<' pos xs
-showRule' JTR (AppendString pos tr : xs)            = showPos JTR pos >>= \x -> return ('A' : x : show tr, xs)
+showRule' JTR (InsertString pos tr : xs)            = do
+    p <- showPos JTR pos
+    s <- showDelimitedString tr
+    return ('A' : p : s, xs)
+showRule' JTR (Update a b c : xs)                   = do
+    pa <- showPos JTR a
+    pb <- showPos JTR b
+    pc <- showPos JTR c
+    return ('v':pa:pb:[pc], xs)
+showRule' JTR (ExtractInsert a b c : xs)            = do
+    pa <- showPos JTR a
+    pb <- showPos JTR b
+    pc <- showPos JTR c
+    return ('X':pa:pb:[pc], xs)
 showRule' _ x = throwError $ "Can't decode: " ++ show x
 

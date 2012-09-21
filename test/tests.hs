@@ -3,6 +3,7 @@ module Main where
 import Test.QuickCheck
 import Mangling
 import Data.Either (lefts, rights)
+import Data.List (inits)
 
 allNumerics :: [Numeric]
 allNumerics = [Intval x | x <- [0..35]] ++
@@ -15,8 +16,7 @@ allNumerics = [Intval x | x <- [0..35]] ++
             , PosFoundChar
             , Infinite ]
 
-allCharacterClassTypes = [ MatchQuestionMark
-                         , MatchVowel
+allCharacterClassTypes = [ MatchVowel
                          , MatchConsonant
                          , MatchWhitespace
                          , MatchPunctuation
@@ -31,9 +31,11 @@ allCharacterClassTypes = [ MatchQuestionMark
 allMChar = [MatchChar x | x <- [' '..'Z']]
 
 allCharacterClass = [CharacterClass ctype b | ctype <- allCharacterClassTypes, b <- [True, False]] ++ [CharacterClass ctype False | ctype <- allMChar]
+allStrings = tail ((take 4 . inits . repeat) "abcABC \\\"'" >>= sequence)
 
-wNum  f = [f n | n <- allNumerics]
-wChar f = [f n | n <- [' '..'Z']]
+wNum    f = [f n | n <- allNumerics]
+wChar   f = [f n | n <- [' '..'Z']]
+wCClass f = [f n | n <- allCharacterClass]
 
 allRules = [ RejectUnlessCaseSensitive -- -c
            , RejectUnless8Bits         -- -8
@@ -73,31 +75,27 @@ allRules = [ RejectUnlessCaseSensitive -- -c
            ++ [Extract a b    | a <- allNumerics, b <- allNumerics]
            ++ [Insert a b     | a <- allNumerics, b <- [' '..'Z'] ]
            ++ [Overstrike a b | a <- allNumerics, b <- [' '..'Z'] ]
-
-{-
-           , AppendString Numeric String
-           , InsertString Numeric String
-
-           , ExtractInsert Numeric Numeric Numeric
-           , Update Numeric Numeric Numeric
-
-           , ReplaceAll CharacterClass Char
-           , RejectUnlessFirstChar CharacterClass
-           , RejectUnlessLastChar CharacterClass
-           , PurgeAll CharacterClass
-           , RejectIfContains CharacterClass
-           , RejectUnlessContains CharacterClass
-
-           , RejectUnlessCharInPos Numeric CharacterClass
-           , RejectUnlessNInstances Numeric CharacterClass
--}
+           ++ [ExtractInsert a b c | a <- allNumerics, b <- allNumerics, c <- allNumerics]
+           ++ [Update a b c        | a <- allNumerics, b <- allNumerics, c <- allNumerics]
+           ++ concatMap wCClass
+           [ RejectUnlessFirstChar
+           , RejectUnlessLastChar
+           , PurgeAll
+           , RejectIfContains
+           , RejectUnlessContains
+           ]
+           ++ [InsertString n s | n <- allNumerics, s <- allStrings]
+           ++ [RejectUnlessCharInPos n c | n <- allNumerics, c <- allCharacterClass]
+           ++ [RejectUnlessNInstances n c | n <- allNumerics, c <- allCharacterClass]
+           ++ [ReplaceAll cc c | cc <- allCharacterClass, c <- [' '..'Z']]
 
 instance Arbitrary Rule where
     arbitrary = elements allRules
 
 testJTR :: [Rule] -> Bool
 testJTR r = let
-    str = showRule JTR r
+    rc  = cleanup r
+    str = showRule JTR rc
     rev = case str of
             Right "" -> parseSingleRule JTR ":"
             Right s  -> parseSingleRule JTR s
@@ -105,7 +103,7 @@ testJTR r = let
     l' = lefts rev
     r' = rights rev
     in if (null l') && (length r' == 1)
-        then head r' == r
+        then head r' == rc
         else False
 
 main = verboseCheck testJTR
