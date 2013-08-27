@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 module Mangling (
         preprocess,
         cleanup,
@@ -15,6 +16,10 @@ import Text.Parsec
 import Control.Applicative hiding (many, (<|>))
 import Data.Char (ord,chr,isSpace,isDigit,toLower,isUpper,toUpper)
 import Control.Monad.Error
+import Control.Lens
+import Data.Data.Lens
+import Data.Typeable
+import Data.Data
 
 data Flavor = JTR | HashCat
     deriving (Show, Ord, Eq)
@@ -86,7 +91,7 @@ data Numeric
     | PosFoundChar
     | Infinite
     | Unknown -- used for error handling
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Typeable, Data)
 
 numeric :: Parser Numeric
 numeric = do
@@ -137,11 +142,11 @@ data CharacterClassType
     | MatchAlphaNum
     | MatchAny
     | MatchChar Char
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Typeable, Data)
 
 -- true = match, false = exclude
 data CharacterClass = CharacterClass CharacterClassType Bool
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Typeable, Data)
 
 charclass :: Parser CharacterClass
 charclass = do
@@ -237,7 +242,7 @@ data Rule
     | RejectUnlessCharInPos Numeric CharacterClass
     | ReplaceAll CharacterClass Char
     | H HashcatRule
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Typeable, Data)
 
 data HashcatRule
     = DuplicateFirstN Numeric
@@ -251,7 +256,7 @@ data HashcatRule
     | SwapFront
     | SwapBack
     | Swap Numeric Numeric
-    deriving (Show, Ord, Eq)
+    deriving (Show, Ord, Eq, Typeable, Data)
 
 singlechar :: Parser Char
 singlechar = anyChar
@@ -347,7 +352,7 @@ rule = do
 
 parserule :: Flavor -> String -> Either String [Rule]
 parserule flavor line = case runP (spaces >> many1 rule) flavor "rule" line of
-                Right x -> Right $ cleanup $ concat x
+                Right x -> Right $ concat x
                 Left  r -> Left  $ show r
 
 removeNBPWD :: String -> String
@@ -359,10 +364,12 @@ removeNBPWD str =
 
 cleanup :: [Rule] -> [Rule]
 cleanup rules =
-    let cleans = concatMap cleanup' rules
+    let cleans = concatMap cleanup' rules & biplate %~ characterClassClean
         l = last cleans
+        characterClassClean (MatchChar '?') = MatchQuestionMark
+        characterClassClean x = x
     in case (cleans, l) of
-           ([], _)               -> []
+           ([], _)               -> [Noop]
            (_, Append ' ')       -> cleans ++ [Noop]
            (_, Prepend ' ')      -> cleans ++ [Noop]
            (_, Insert _ ' ')     -> cleans ++ [Noop]
@@ -392,7 +399,7 @@ parseRuleFile flavor fname = do
         parsed = map (parserule flavor) processedrules
         paired = zip3 ([1..] :: [Int]) processedrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
-        niceError (_, _  , Right x ) = Right x
+        niceError (_, _  , Right x ) = Right (cleanup x)
     return $ map niceError paired
 
 escapeJTR :: String -> String

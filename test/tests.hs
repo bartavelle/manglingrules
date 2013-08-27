@@ -16,6 +16,7 @@ allNumerics = [Intval x | x <- [0..35]] ++
             , PosFoundChar
             , Infinite ]
 
+allCharacterClassTypes :: [CharacterClassType]
 allCharacterClassTypes = [ MatchVowel
                          , MatchConsonant
                          , MatchWhitespace
@@ -28,15 +29,16 @@ allCharacterClassTypes = [ MatchVowel
                          , MatchAlphaNum
                          , MatchAny ]
 
+allMChar :: [CharacterClassType]
 allMChar = [MatchChar x | x <- [' '..'Z']]
 
+allCharacterClass :: [CharacterClass]
 allCharacterClass = [CharacterClass ctype b | ctype <- allCharacterClassTypes, b <- [True, False]] ++ [CharacterClass ctype False | ctype <- allMChar]
+
+allStrings :: [String]
 allStrings = tail ((take 4 . inits . repeat) "abcABC \\\"'" >>= sequence)
 
-wNum    f = [f n | n <- allNumerics]
-wChar   f = [f n | n <- [' '..'Z']]
-wCClass f = [f n | n <- allCharacterClass]
-
+allRules :: [Rule]
 allRules = [ RejectUnlessCaseSensitive -- -c
            , RejectUnless8Bits         -- -8
            , RejectUnlessSplit         -- -s
@@ -88,6 +90,11 @@ allRules = [ RejectUnlessCaseSensitive -- -c
            ++ [RejectUnlessCharInPos n c | n <- allNumerics, c <- allCharacterClass]
            ++ [RejectUnlessNInstances n c | n <- allNumerics, c <- allCharacterClass]
            ++ [ReplaceAll cc c | cc <- allCharacterClass, c <- [' '..'Z']]
+    where
+        wNum    f = [f n | n <- allNumerics]
+        wChar   f = [f n | n <- [' '..'Z']]
+        wCClass f = [f n | n <- allCharacterClass]
+
 
 instance Arbitrary Rule where
     arbitrary = elements allRules
@@ -106,4 +113,5 @@ testJTR r = let
         then head r' == rc
         else False
 
+main :: IO ()
 main = verboseCheck testJTR
