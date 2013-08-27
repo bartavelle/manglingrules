@@ -352,7 +352,7 @@ rule = do
 
 parserule :: Flavor -> String -> Either String [Rule]
 parserule flavor line = case runP (spaces >> many1 rule) flavor "rule" line of
-                Right x -> Right $ concat x
+                Right x -> Right $ cleanup $ concat x
                 Left  r -> Left  $ show r
 
 removeNBPWD :: String -> String
@@ -399,7 +399,7 @@ parseRuleFile flavor fname = do
         parsed = map (parserule flavor) processedrules
         paired = zip3 ([1..] :: [Int]) processedrules parsed
         niceError (l, raw, Left err) = Left (err ++ "\n" ++ raw ++ "\nline " ++ show l)
-        niceError (_, _  , Right x ) = Right (cleanup x)
+        niceError (_, _  , Right x ) = Right x
     return $ map niceError paired
 
 escapeJTR :: String -> String
@@ -414,7 +414,7 @@ escapeJTR' x    = [x]
 showDelimitedString :: String -> Either String String
 showDelimitedString s =
     let acceptable = '"' : ['a'..'z'] ++ ['A'..'Z']
-        valids = filter (\x -> not (x `elem` s)) acceptable
+        valids = filter (`notElem` s) acceptable
     in case valids of
            []    -> Left "Impossible to select a valid character for a delimited string"
            (x:_) -> Right (x : s ++ [x])
@@ -427,9 +427,9 @@ showRule f rules = do
                         JTR -> escapeJTR curstring
                         _   -> curstring
     nextstring <- showRule f nextrules
-    if null nextstring
-        then return pstring
-        else return $ pstring ++ " " ++ nextstring
+    return $ if null nextstring
+        then pstring
+        else pstring ++ " " ++ nextstring
 
 fixpos :: Flavor -> Char -> Numeric -> [Rule] -> Either String (String, [Rule])
 fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
