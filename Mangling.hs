@@ -20,6 +20,8 @@ import Control.Lens
 import Data.Data.Lens
 import Data.Typeable
 import Data.Data
+import Data.Maybe (mapMaybe)
+import Data.List (intercalate)
 
 data Flavor = JTR | HashCat
     deriving (Show, Ord, Eq)
@@ -364,10 +366,44 @@ removeNBPWD str =
 
 cleanup :: [Rule] -> [Rule]
 cleanup rules =
-    let cleans = concatMap cleanup' rules & biplate %~ characterClassClean
+    let cleans = (concatMap cleanup' $ mapMaybe optimizeSingle $ optimizePairs rules) & biplate %~ characterClassClean
         l = last cleans
         characterClassClean (MatchChar '?') = MatchQuestionMark
         characterClassClean x = x
+        optimizeSingle :: Rule -> Maybe Rule
+        optimizeSingle (H (AsciiDecrement (Intval 0))) = Nothing
+        optimizeSingle (H (AsciiIncrement (Intval 0))) = Nothing
+        optimizeSingle x@(H (AsciiDecrement (Intval n))) = if n < 0
+                                                               then Just (H (AsciiIncrement (Intval (negate n))))
+                                                               else Just x
+        optimizeSingle x@(H (AsciiIncrement (Intval n))) = if n < 0
+                                                               then Just (H (AsciiDecrement (Intval (negate n))))
+                                                               else Just x
+        optimizeSingle (H (BitwiseLeft (Intval 0))) = Nothing
+        optimizeSingle (H (BitwiseRight (Intval 0))) = Nothing
+        optimizeSingle x@(H (BitwiseLeft (Intval n))) = if n < 0
+                                                               then Just (H (BitwiseRight (Intval (negate n))))
+                                                               else Just x
+        optimizeSingle x@(H (BitwiseRight (Intval n))) = if n < 0
+                                                               then Just (H (BitwiseLeft (Intval (negate n))))
+                                                               else Just x
+        optimizeSingle (InsertString x [c]) = Just (Insert x c)
+        optimizeSingle x = Just x
+        optimizePairs :: [Rule] -> [Rule]
+        optimizePairs (a:b:xs) = case optimizePair a b of
+                                     Just n -> optimizePairs (n : xs)
+                                     Nothing -> a : optimizePairs (b : xs)
+        optimizePairs x = x
+        optimizePair :: Rule -> Rule -> Maybe Rule
+        optimizePair (H (AsciiDecrement (Intval a))) (H (AsciiDecrement (Intval b))) = Just $ H (AsciiDecrement (Intval (a+b)))
+        optimizePair (H (AsciiIncrement (Intval a))) (H (AsciiIncrement (Intval b))) = Just $ H (AsciiIncrement (Intval (a+b)))
+        optimizePair (H (AsciiDecrement (Intval a))) (H (AsciiIncrement (Intval b))) = Just $ H (AsciiDecrement (Intval (a-b)))
+        optimizePair (H (AsciiIncrement (Intval a))) (H (AsciiDecrement (Intval b))) = Just $ H (AsciiIncrement (Intval (a-b)))
+        optimizePair (H (BitwiseLeft (Intval a))) (H (BitwiseLeft (Intval b))) = Just $ H (BitwiseLeft (Intval (a+b)))
+        optimizePair (H (BitwiseRight (Intval a))) (H (BitwiseRight (Intval b))) = Just $ H (BitwiseRight (Intval (a+b)))
+        optimizePair (H (BitwiseLeft (Intval a))) (H (BitwiseRight (Intval b))) = Just $ H (BitwiseLeft (Intval (a-b)))
+        optimizePair (H (BitwiseRight (Intval a))) (H (BitwiseLeft (Intval b))) = Just $ H (BitwiseRight (Intval (a-b)))
+        optimizePair _ _ = Nothing
     in case (cleans, l) of
            ([], _)               -> [Noop]
            (_, Append ' ')       -> cleans ++ [Noop]
@@ -404,12 +440,9 @@ parseRuleFile flavor fname = do
 
 escapeJTR :: String -> String
 escapeJTR = concatMap escapeJTR'
-
-escapeJTR' :: Char -> String
-escapeJTR' '['  = "\\["
-escapeJTR' ']'  = "\\]"
-escapeJTR' '\\' = "\\\\"
-escapeJTR' x    = [x]
+    where
+        escapeJTR' x | x `elem` "[]\\" = ['\\', x]
+                     | otherwise = [x]
 
 showDelimitedString :: String -> Either String String
 showDelimitedString s =
@@ -421,126 +454,97 @@ showDelimitedString s =
 
 showRule :: Flavor -> [Rule] -> Either String String
 showRule _ []    = Right ""
-showRule f rules = do
-    (curstring, nextrules) <- showRule' f rules
-    let pstring = case f of
-                        JTR -> escapeJTR curstring
-                        _   -> curstring
-    nextstring <- showRule f nextrules
-    return $ if null nextstring
-        then pstring
-        else pstring ++ " " ++ nextstring
+showRule f rules = fmap (intercalate " " . mightescape) $ mapM (showRule' f) rules
+    where
+        mightescape = case f of
+                          JTR -> map escapeJTR
+                          _ -> id
 
-fixpos :: Flavor -> Char -> Numeric -> [Rule] -> Either String (String, [Rule])
-fixpos f c pos xs = fmap (\x -> ([c, x], xs)) $ showPos f pos
+fixpos :: Flavor -> Char -> Numeric -> Either String String
+fixpos f c pos = fmap (\x -> [c, x]) $ showPos f pos
 
-showRule' :: Flavor -> [Rule] -> Either String (String, [Rule])
-showRule' _ [] = return ("", [])
-showRule' f   (H (AsciiDecrement (Intval a)) : H (AsciiDecrement (Intval b)) : xs) = showRule' f (H (AsciiDecrement (Intval (a+b))) : xs)
-showRule' f   (H (AsciiIncrement (Intval a)) : H (AsciiIncrement (Intval b)) : xs) = showRule' f (H (AsciiIncrement (Intval (a+b))) : xs)
-showRule' f   (H (AsciiDecrement (Intval a)) : H (AsciiIncrement (Intval b)) : xs) | a == b    = showRule' f xs
-                                                                                   | otherwise = showRule' f (H (AsciiDecrement (Intval (a-b))) : xs)
-showRule' f   (H (AsciiIncrement (Intval a)) : H (AsciiDecrement (Intval b)) : xs) | a == b    = showRule' f xs
-                                                                                   | otherwise = showRule' f (H (AsciiIncrement (Intval (a-b))) : xs)
-showRule' f   (H (AsciiIncrement (Intval a)) : xs ) | a == 0          = showRule' f xs
-                                                    | a < 0           = showRule' f (H (AsciiDecrement (Intval (negate a))) : xs)
-                                                    | f == HashCat    = fixpos f '-' (Intval a) xs
-                                                    | otherwise       = throwError "Ascii +/- operations not supported"
-showRule' f   (H (AsciiDecrement (Intval a)) : xs ) | a == 0          = showRule' f xs
-                                                    | a < 0           = showRule' f (H (AsciiIncrement (Intval (negate a))) : xs)
-                                                    | f == HashCat    = fixpos f '+' (Intval a) xs
-                                                    | otherwise       = throwError "Ascii +/- operations not supported"
-showRule' f   (H (BitwiseLeft  (Intval a)) : H (BitwiseLeft (Intval b))  : xs) = showRule' f (H (BitwiseLeft (Intval (a+b))) : xs)
-showRule' f   (H (BitwiseRight (Intval a)) : H (BitwiseRight (Intval b)) : xs) = showRule' f (H (BitwiseRight (Intval (a+b))) : xs)
-showRule' f   (H (BitwiseLeft  (Intval a)) : H (BitwiseRight (Intval b)) : xs) | a == b    = showRule' f xs
-                                                                               | otherwise = showRule' f (H (BitwiseLeft (Intval (a-b))) : xs)
-showRule' f   (H (BitwiseRight (Intval a)) : H (BitwiseLeft (Intval b))  : xs) | a == b    = showRule' f xs
-                                                                               | otherwise = showRule' f (H (BitwiseRight (Intval (a-b))) : xs)
-showRule' f   (H (BitwiseRight (Intval a)) : xs ) | a == 0          = showRule' f xs
-                                                  | a < 0           = showRule' f (H (BitwiseLeft (Intval (negate a))) : xs)
-                                                  | f == HashCat    = fixpos f 'R' (Intval a) xs
-                                                  | otherwise       = throwError "Bitwise operations not supported"
-showRule' f   (H (BitwiseLeft (Intval a)) : xs )  | a == 0          = showRule' f xs
-                                                  | a < 0           = showRule' f (H (BitwiseRight (Intval (negate a))) : xs)
-                                                  | f == HashCat    = fixpos f 'L' (Intval a) xs
-                                                  | otherwise       = throwError "Bitwise operations not supported"
-showRule' _   (ReplaceAll cc c  : xs)   = return ('s' : showCC cc ++ [c], xs)
-showRule' _   (PurgeAll cc      : xs)   = return ('@' : showCC cc, xs)
-showRule' _   (Append c         : xs)   = return (['$',c], xs)
-showRule' _   (Prepend c        : xs)   = return (['^',c], xs)
-showRule' _   (LowerCase        : xs)   = return ("l", xs)
-showRule' _   (RotateLeft       : xs)   = return ("{", xs)
-showRule' _   (RotateRight      : xs)   = return ("}", xs)
-showRule' _   (DeleteFirst      : xs)   = return ("[", xs)
-showRule' _   (DeleteLast       : xs)   = return ("]", xs)
-showRule' _   (Capitalize       : xs)   = return ("c", xs)
-showRule' _   (ToggleAllCase    : xs)   = return ("t", xs)
-showRule' _   (Reverse          : xs)   = return ("r", xs)
-showRule' _   (Duplicate        : xs)   = return ("d", xs)
-showRule' _   (Reflect          : xs)   = return ("f", xs)
-showRule' _   (UpperCase        : xs)   = return ("u", xs)
-showRule' _   (LowerVowels      : xs)   = return ("V", xs)
-showRule' _   (ShiftCase        : xs)   = return ("S", xs)
-showRule' JTR (ShiftRightKeyboard:xs)   = return ("R", xs)
-showRule' JTR (ShiftLeftKeyboard: xs)   = return ("L", xs)
-showRule' JTR (PastTense        : xs)   = return ("P", xs)
-showRule' JTR (Genitive         : xs)   = return ("I", xs)
-showRule' f   (Insert     p c   : xs)   = showPos f p >>= \x -> return (['i', x, c], xs)
-showRule' f   (Overstrike p c   : xs)   = showPos f p >>= \x -> return (['o', x, c], xs)
-showRule' JTR (Extract a b      : xs)   = do
+showRule' :: Flavor -> Rule -> Either String String
+showRule' HashCat (H (AsciiIncrement (Intval a)) ) = fixpos HashCat '-' (Intval a)
+showRule' HashCat (H (AsciiDecrement (Intval a)) ) = fixpos HashCat '+' (Intval a)
+showRule' HashCat (H (BitwiseRight (Intval a))   ) = fixpos HashCat 'R' (Intval a)
+showRule' HashCat (H (BitwiseLeft (Intval a))    ) = fixpos HashCat 'L' (Intval a)
+showRule' _   (ReplaceAll cc c                   ) = return ('s' : showCC cc ++ [c])
+showRule' _   (PurgeAll cc                       ) = return ('@' : showCC cc)
+showRule' _   (Append c                          ) = return ['$',c]
+showRule' _   (Prepend c                         ) = return ['^',c]
+showRule' _   (LowerCase                         ) = return "l"
+showRule' _   (RotateLeft                        ) = return "{"
+showRule' _   (RotateRight                       ) = return "}"
+showRule' _   (DeleteFirst                       ) = return "["
+showRule' _   (DeleteLast                        ) = return "]"
+showRule' _   (Capitalize                        ) = return "c"
+showRule' _   (ToggleAllCase                     ) = return "t"
+showRule' _   (Reverse                           ) = return "r"
+showRule' _   (Duplicate                         ) = return "d"
+showRule' _   (Reflect                           ) = return "f"
+showRule' _   (UpperCase                         ) = return "u"
+showRule' _   (LowerVowels                       ) = return "V"
+showRule' _   (ShiftCase                         ) = return "S"
+showRule' JTR (ShiftRightKeyboard                ) = return "R"
+showRule' JTR (ShiftLeftKeyboard                 ) = return "L"
+showRule' JTR (PastTense                         ) = return "P"
+showRule' JTR (Genitive                          ) = return "I"
+showRule' f   (Insert     p c                    ) = fmap (\x -> ['i', x, c]) $ showPos f p
+showRule' f   (Overstrike p c                    ) = fmap (\x -> ['o', x, c]) $ showPos f p
+showRule' JTR (Extract a b                       ) = do
     pa <- showPos JTR a
     pb <- showPos JTR b
-    return (['x', pa, pb], xs)
-showRule' f   (Truncate pos     : xs)               = fixpos f '\'' pos xs
-showRule' f   (ToggleCase pos   : xs)               = fixpos f 'T' pos xs
-showRule' f   (Delete pos       : xs)               = fixpos f 'D' pos xs
-showRule' JTR (H (DuplicateLastN (Intval x))  : xs) = return ( unwords ("val1" : replicate x "Xa1a"), xs )
-showRule' f   (H (DuplicateLastN pos)         : xs) = fixpos f 'Z' pos xs
-showRule' JTR (H (DuplicateFirstN (Intval x)) : xs) = return ( unwords (replicate x "X010"), xs )
-showRule' f   (H (DuplicateFirstN pos)        : xs) = fixpos f 'z' pos xs
-showRule' JTR (H (DuplicateWord (Intval x))   : xs) = return ( unwords ("val0" : replicate x "X0aa"), xs )
-showRule' f   (H (DuplicateWord pos)          : xs) = fixpos f 'p' pos xs
-showRule' JTR (H SwapFront                    : xs) = return ( "X012 D0", xs)
-showRule' JTR (H (Swap p1 (Intval p2))        : xs) = do
+    return ['x', pa, pb]
+showRule' f   (Truncate pos                   ) = fixpos f '\'' pos
+showRule' f   (ToggleCase pos                 ) = fixpos f 'T' pos
+showRule' f   (Delete pos                     ) = fixpos f 'D' pos
+showRule' JTR (H (DuplicateLastN (Intval x))  ) = return $ unwords ("val1" : replicate x "Xa1a")
+showRule' f   (H (DuplicateLastN pos)         ) = fixpos f 'Z' pos
+showRule' JTR (H (DuplicateFirstN (Intval x)) ) = return $ unwords (replicate x "X010")
+showRule' f   (H (DuplicateFirstN pos)        ) = fixpos f 'z' pos
+showRule' JTR (H (DuplicateWord (Intval x))   ) = return $ unwords ("val0" : replicate x "X0aa")
+showRule' f   (H (DuplicateWord pos)          ) = fixpos f 'p' pos
+showRule' JTR (H SwapFront                    ) = return "X012 D0"
+showRule' JTR (H (Swap p1 (Intval p2))        ) = do
     r1  <- showPos JTR p1
     r2  <- showPos JTR (Intval p2)
     r2' <- showPos JTR (Intval (p2+1))
-    return ( ['X', r1, '1', r2, ' ', 'D', r1, ' ', 'X', r2, '1', r1, ' ', 'D', r2'], xs)
-showRule' f   (H (Swap p1 p2)                 : xs) = do
+    return ['X', r1, '1', r2, ' ', 'D', r1, ' ', 'X', r2, '1', r1, ' ', 'D', r2']
+showRule' f   (H (Swap p1 p2)                ) = do
     r1 <- showPos f p1
     r2 <- showPos f p2
-    return ( ['*', r1, r2], xs )
-showRule' JTR (H DuplicateAll : _)                  = throwError "DuplicateAll (q in HashCat) is not supported for JTR yet."
-showRule' _   (H DuplicateAll : xs)                 = return ("q", xs)
-showRule' JTR (RejectUnless8Bits : xs)              = return ("-8", xs)
-showRule' JTR (Noop : xs)                           = return (":", xs)
-showRule' JTR (Memorize : xs)                       = return ("M", xs)
-showRule' JTR (Pluralize : xs)                      = return ("p", xs)
-showRule' JTR (RejectUnlessChanged : xs)            = return ("Q", xs)
-showRule' JTR (RejectUnlessCaseSensitive : xs)      = return ("-c", xs)
-showRule' JTR (RejectUnlessSplit : xs)              = return ("-s", xs)
-showRule' JTR (RejectUnlessWordPairs : xs)          = return ("-p", xs)
-showRule' JTR (RejectIfContains cc : xs)            = return ('!' : showCC cc, xs)
-showRule' JTR (RejectUnlessContains cc : xs)        = return ('/' : showCC cc, xs)
-showRule' JTR (RejectUnlessFirstChar cc : xs)       = return ('(' : showCC cc, xs)
-showRule' JTR (RejectUnlessLastChar cc : xs)        = return (')' : showCC cc, xs)
-showRule' JTR (RejectUnlessCharInPos p cc : xs)     = fmap (\x -> ('=' : x : showCC cc, xs)) (showPos JTR p)
-showRule' JTR (RejectUnlessNInstances p cc : xs)    = fmap (\x -> ('N' : x : showCC cc, xs)) (showPos JTR p)
-showRule' JTR (RejectUnlessLengthMore pos : xs)     = fixpos JTR '>' pos xs
-showRule' JTR (RejectUnlessLengthLess pos : xs)     = fixpos JTR '<' pos xs
-showRule' JTR (InsertString pos tr : xs)            = do
+    return ['*', r1, r2]
+showRule' HashCat (H DuplicateAll)          = return "q"
+showRule' JTR RejectUnless8Bits             = return "-8"
+showRule' JTR Noop                          = return ":"
+showRule' JTR Memorize                      = return "M"
+showRule' JTR Pluralize                     = return "p"
+showRule' JTR RejectUnlessChanged           = return "Q"
+showRule' JTR RejectUnlessCaseSensitive     = return "-c"
+showRule' JTR RejectUnlessSplit             = return "-s"
+showRule' JTR RejectUnlessWordPairs         = return "-p"
+showRule' JTR (RejectIfContains cc)         = return ('!' : showCC cc)
+showRule' JTR (RejectUnlessContains cc)     = return ('/' : showCC cc)
+showRule' JTR (RejectUnlessFirstChar cc)    = return ('(' : showCC cc)
+showRule' JTR (RejectUnlessLastChar cc)     = return (')' : showCC cc)
+showRule' JTR (RejectUnlessCharInPos p cc)  = fmap (\x -> '=' : x : showCC cc) (showPos JTR p)
+showRule' JTR (RejectUnlessNInstances p cc) = fmap (\x -> 'N' : x : showCC cc) (showPos JTR p)
+showRule' JTR (RejectUnlessLengthMore pos)  = fixpos JTR '>' pos
+showRule' JTR (RejectUnlessLengthLess pos)  = fixpos JTR '<' pos
+showRule' JTR (InsertString pos tr)         = do
     p <- showPos JTR pos
     s <- showDelimitedString tr
-    return ('A' : p : s, xs)
-showRule' JTR (Update a b c : xs)                   = do
+    return ('A' : p : s)
+showRule' JTR (Update a b c)                  = do
     pa <- showPos JTR a
     pb <- showPos JTR b
     pc <- showPos JTR c
-    return ('v':pa:pb:[pc], xs)
-showRule' JTR (ExtractInsert a b c : xs)            = do
+    return ('v':pa:pb:[pc])
+showRule' JTR (ExtractInsert a b c)           = do
     pa <- showPos JTR a
     pb <- showPos JTR b
     pc <- showPos JTR c
-    return ('X':pa:pb:[pc], xs)
+    return ('X':pa:pb:[pc])
+showRule' JTR (H x) = throwError $ "Can't translate this specific Hashcat rule: " ++ show x
 showRule' _ x = throwError $ "Can't decode: " ++ show x
 
